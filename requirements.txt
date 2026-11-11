@@ -1,0 +1,4 @@
+# 传统引擎与强化学习引擎共用 numpy；强化学习部分还需要 torch（CPU 版即可）。
+# 只玩传统引擎（server_ab.py / play_ab.py）时不需要安装任何第三方包。
+numpy>=1.24
+torch>=2.0        # CPU 版即可：pip install torch --index-url https://download.pytorch.org/whl/cpu

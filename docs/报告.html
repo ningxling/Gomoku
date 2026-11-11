@@ -1,0 +1,80 @@
+<!DOCTYPE html><html><head><meta charset='utf-8'><title>docs\报告.md</title><style>
+@page { size: A4; margin: 2.2cm 1.9cm; }
+body { font-family: "Microsoft YaHei", sans-serif; font-size: 10.5pt;
+       line-height: 1.75; color: #1a1a1a; }
+h1 { font-size: 19pt; text-align: center; margin: 0 0 4pt 0; }
+h2 { font-size: 13.5pt; margin: 16pt 0 7pt 0; padding-left: 8pt;
+     border-left: 4px solid #2b6cb0; color: #1a365d; }
+h3 { font-size: 11.5pt; margin: 11pt 0 5pt 0; color: #2b4c7e; }
+p  { margin: 5pt 0; }
+ul, ol { margin: 5pt 0 5pt 20pt; }
+li { margin: 2pt 0; }
+table { border-collapse: collapse; width: 100%; margin: 8pt 0; font-size: 9.5pt;
+        page-break-inside: avoid; }
+th, td { border: 1px solid #c9d3dd; padding: 4pt 7pt; }
+th { background: #edf2f7; font-weight: 600; }
+code { font-family: Consolas, monospace; background: #f2f4f7; padding: 1pt 3pt; }
+pre { background: #f6f8fa; border: 1px solid #e3e8ee; padding: 8pt;
+      font-family: Consolas, monospace; font-size: 9pt; line-height: 1.5;
+      white-space: pre-wrap; page-break-inside: avoid; }
+blockquote { border-left: 3px solid #cbd5e0; margin: 6pt 0; padding: 3pt 12pt;
+             color: #4a5568; background: #fafbfc; }
+hr { border: none; border-top: 1px solid #e2e8f0; margin: 12pt 0; }
+a { color: #2b6cb0; text-decoration: none; }
+</style></head><body><h1>五子棋：传统搜索与强化学习双引擎 —— 项目报告</h1>
+<blockquote>课程：数据结构与算法（2026 秋）　姓名：<b>&lt;你的名字&gt;</b>　院系：<b>&lt;你的院系&gt;</b><br>项目名称：Gomoku 双引擎五子棋<br>仓库地址：<b>&lt;https://github.com/你的用户名/Gomoku&gt;</b><br>提交版本：<b>v1.0</b>（tag）</blockquote>
+<hr>
+<h2>1. 项目概述</h2>
+<p>面向"想下一盘五子棋、又想看看不同 AI 谁更强"的场景，实现了一个浏览器里可玩的五子棋项目：</p>
+<ul><li><b>传统搜索引擎</b>：α-β 迭代加深 + 棋型评估 + 威胁表 + VCF 算杀 + 禁手判定，纯 Python 手写；</li><li><b>强化学习引擎</b>：AlphaZero 风格（策略价值网络 + PUCT MCTS + 自我对弈），30 万参数；</li><li><b>三种对局模式</b>：人人对战、人机对战（可选引擎）、传统 vs 强化自动观战；</li><li><b>训练流水线</b>：远程训练、权重回传、基准赛、健康监控、权重存档。</li></ul>
+<p>选择它的理由是：五子棋同时适合<b>经典搜索</b>（能把手写的 α-β 做到可量化的强度）和<b>学习和搜索结合</b> （AlphaZero），两者放在同一界面里对比，能把课程里的搜索、剪枝、哈希、树结构一次讲清楚。</p>
+<hr>
+<h2>2. 核心设计（课程知识）</h2>
+<h3>2.1 数据结构：长度-5 窗口 + 三进制编码</h3>
+<p>19×19 在 4 个方向共 <b>1020 个"长度 5 的窗口"</b>，每个窗口用 5 位三进制编码（0 空 / 1 黑 / 2 白）， 编码值 0~242 直接当作查表下标：</p>
+<table><tr><th>表</th><th>用途</th></tr><tr><td><code>_TB[243]</code> / <code>_TW[243]</code></td><td>窗口分值：成五 10⁷、四 2000、活三 200、二 20</td></tr><tr><td><code>_FOUR_MASK[243]</code></td><td>该窗口是否"4 子 + 1 空"（即存在成五点）</td></tr></table>
+<p><b>关键性质</b>：落子只影响 20 个窗口（4 方向 × 5），所以评估是 <b>O(20) 增量更新</b>，不需要重扫棋盘。 这就是纯 Python 也能跑到 1~2 万节点/秒的原因。</p>
+<h3>2.2 威胁表：把"强制着法"从搜索里摘出来</h3>
+<p>维护 <code>tcnt[player]</code>：记录"哪些空点能让该方下一手成五"。窗口变成"4 子 + 1 空"时对空位 +1， 破坏时 -1。于是每个节点 O(1) 判断：</p>
+<ul><li>自己有冲四点 → 直接判必胜，不搜索；</li><li>对方有冲四点 → 只能挡（唯一挡点只搜一手）。</li></ul>
+<h3>2.3 搜索</h3>
+<p>negamax + α-β + 置换表（Zobrist，EXACT/LOWER/UPPER）+ 迭代加深（2→10 层，超时回退）+ 候选点按"进攻分 + 0.9×防守分"排序 + 叶子节点强制着法延伸 + VCF 连续冲四算杀。</p>
+<h3>2.4 复杂度</h3>
+<table><tr><th>操作</th><th>代价</th></tr><tr><td>落子 / 撤销</td><td>O(20)</td></tr><tr><td>静态评估</td><td>O(1)</td></tr><tr><td>单点排序分</td><td>O(20)</td></tr><tr><td>威胁表维护</td><td>O(40)</td></tr><tr><td>单节点总体</td><td>约 50~80 μs（实测 1.2~2 万节点/秒）</td></tr></table>
+<hr>
+<h2>3. 实验与结果</h2>
+<h3>3.1 消融实验：三个部件各值多少</h3>
+<p>19×19、限时 0.3 秒、3 个安静开局取平均；9×9 快棋 0.05 秒/手、各 8 局交替先后手。 完整脚本：<code>tools/ablation_engine.py</code>，输出：<code>docs/ablation_result.md</code>。</p>
+<table><tr><th>配置</th><th>平均深度</th><th>节点数</th><th>耗时</th><th>对完整版胜率</th></tr><tr><td>完整版</td><td><b>5.0</b></td><td>5,973</td><td>312 ms</td><td>—</td></tr><tr><td>去掉置换表</td><td>5.0</td><td>5,888</td><td>307 ms</td><td>38%</td></tr><tr><td>去掉 VCF</td><td>5.0</td><td>6,059</td><td>306 ms</td><td>50%</td></tr><tr><td>去掉威胁表</td><td><b>2.7</b></td><td>2,901</td><td>313 ms</td><td><b>25%</b></td></tr></table>
+<p><b>结论</b></p>
+<ol><li>威胁表贡献最大：同样 0.3 秒，深度从 5.0 掉到 2.7，胜率掉到 25%。它砍掉的是"必须应"的分支。</li><li>置换表在这个深度下<b>没有可测收益</b>（5973 vs 5888 节点）——诚实记录：它的价值要在更深搜索中体现。</li><li>VCF 只影响"能否算出强制胜"（战术表里唯一失效项），对 9×9 快棋胜率影响不大。</li></ol>
+<h3>3.2 强化学习 vs 传统引擎</h3>
+<p>19×19、每局随机 4 手开局、网络 60 次模拟、传统引擎 0.1 秒/手：</p>
+<table><tr><th>训练轮数</th><th>局数</th><th>胜率</th></tr><tr><td>1204</td><td>12</td><td>25%</td></tr><tr><td>1252</td><td>12</td><td>8%</td></tr><tr><td>1318</td><td>24</td><td>17%</td></tr><tr><td><b>合计</b></td><td><b>60</b></td><td><b>20%</b></td></tr></table>
+<p>强化模型训练了约 1300 轮（每轮 8 局自我对弈），policy loss 从 3.1 降到 1.1。</p>
+<h3>3.3 一个方法论错误（值得记录）</h3>
+<p>早期基准赛用 6 局，出现"16.7% 胜率"。后来发现两个 agent 都是确定性的， <b>6 局其实是同一盘棋重复 3 遍</b>（执黑 3 局、执白 3 局），真实分辨率只有 2 盘。 加上"每局随机 4 手开局"后才得到上表可信数据。</p>
+<hr>
+<h2>4. 测试</h2>
+<p><code>python test_engine.py</code> 共 20+ 项断言，全部通过：</p>
+<table><tr><th>分组</th><th>覆盖内容</th></tr><tr><td>棋规</td><td>空盘天元、有四必成五、单头四必挡、跳四</td></tr><tr><td>禁手</td><td>长连、双活三、跳三、白棋无禁手</td></tr><tr><td>算杀</td><td>活三做活四（VCF）</td></tr><tr><td>防守</td><td>边上活三、<b>远处活三回归用例</b></td></tr><tr><td>自对弈</td><td>9×9 4 局 + 15×15 2 局，无非法/禁手着法</td></tr><tr><td>HTTP</td><td>页面、<code>/move</code>、15×15 自动识别、纯传统服务器拒绝 <code>nn</code></td></tr><tr><td>双引擎</td><td>ab/nn 出招、禁手开关、无权重返回 503</td></tr><tr><td>AI 对战</td><td>两引擎交替下完整一局</td></tr></table>
+<hr>
+<h2>5. 局限与改进</h2>
+<ol><li><b>强度</b>：强化模型对传统引擎约 20%。瓶颈是"看不见两级威胁"（活三→活四），</li></ol>
+<p>60~120 次模拟在 19×19 上等效深度只有 3~4 层，而 VCF 需要 6~10 层。</p>
+<ol><li><b>速度</b>：纯 Python，19×19 每步 1~2 秒到顶。</li><li><b>尺寸迁移</b>：全卷积网络权重与尺寸无关，但只用 19×19 训练，实测 9×9 胜率从 25% 掉到 8%</li></ol>
+<p>（感受野 19 格 &gt; 9×9 边长，价值头全局池化尺度也错位）。</p>
+<ol><li><b>后续</b>：把威胁表接进 MCTS（树内强制扩展）做混合体；有 GPU 后加宽网络到 128ch×8block。</li></ol>
+<hr>
+<h2>6. AI 使用声明</h2>
+<pre>使用工具：DeepSeek Harness（coding agent）
+参与环节：需求拆解、传统引擎与训练流水线编码、调试、测试、实验设计、文档初稿、运维脚本
+本人完成的设计、修改与判断：选题与目标；逐段审查 AI 产出并跑测试；否决/纠正 AI 的错误方案；
+                          所有结论以实测数据为准
+验证方法及结果：test_engine.py 20+ 项断言全通过；消融实验；60 局基准赛；训练曲线
+代表性协作案例：docs/AI协作记录.md（采样温度误判、基准赛方法错误、one-hot 与剪枝的边界）
+引用与复用的外部资源：kimi3 的五子棋实现（game/model/mcts/train/server/html 初版），
+                    修改范围见 README 第七节</pre>
+<hr>
+<h2>7. 截图</h2>
+<p>（在此插入：① 人机对战界面 ② 传统 vs 强化观战 ③ 训练曲线 <code>docs/bench_log.csv</code> 绘图）</p></body></html>

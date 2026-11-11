@@ -1,0 +1,12 @@
+# 统一换行符，避免"Linux 上 .sh 跑不了 / Windows 上 .bat 乱码"
+* text=auto
+*.sh  text eol=lf
+*.bat text eol=crlf
+*.py  text eol=lf
+*.md  text eol=lf
+*.html text eol=lf
+
+# 二进制文件不要做换行转换
+*.pt  binary
+*.png binary
+*.jpg binary

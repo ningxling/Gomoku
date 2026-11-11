@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 权重：只保留一份演示用的 latest.pt，其余不入库
+gomoku/checkpoints/*.pt
+!gomoku/checkpoints/latest.pt
+gomoku/checkpoints/history/
+gomoku/checkpoints/*.json
+
+# 训练/运行产物
+train.log*
+train.err
+monitor.csv
+monitor.log
+snapshot.log
+watchdog.log
+*.tmp
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>五子棋 Gomoku</title>
+<style>
+  body { font-family: "Microsoft YaHei", sans-serif; display: flex; flex-direction: column;
+         align-items: center; background: #f0d9a8; margin: 0; padding: 20px; }
+  h1 { margin: 8px 0; }
+  #bar { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; flex-wrap: wrap;
+         justify-content: center; }
+  button, select { padding: 6px 14px; font-size: 14px; cursor: pointer; border-radius: 6px;
+                   border: 1px solid #a0522d; background: #fff8ec; }
+  button:hover { background: #ffe9c4; }
+  #status { font-size: 16px; font-weight: bold; margin-bottom: 10px; min-height: 22px; }
+  #aiinfo { font-size: 12px; color: #6b4b2a; min-height: 18px; margin-bottom: 8px; }
+  canvas { background: #eec96f; border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,.3);
+           cursor: pointer; }
+  .thinking { color: #a0522d; }
+</style>
+</head>
+<body>
+<h1>五子棋</h1>
+<div id="bar">
+  <select id="mode">
+    <option value="pvp">人人对战</option>
+    <option value="pve-black">人机对战 (我执黑先手)</option>
+    <option value="pve-white">人机对战 (我执白后手)</option>
+    <option value="aivai">AI 对战 (传统 vs 强化)</option>
+  </select>
+  <select id="engine" title="人机对战时 AI 用哪个引擎">
+    <option value="ab">AI: 传统搜索 (α-β)</option>
+    <option value="nn">AI: 强化学习 (AlphaZero)</option>
+  </select>
+  <select id="first" title="AI 对战时哪一方执黑先手" style="display:none">
+    <option value="ab">黑: 传统搜索</option>
+    <option value="nn">黑: 强化学习</option>
+  </select>
+  <select id="size">
+    <option value="19" selected>19×19 (推荐)</option>
+    <option value="15">15×15</option>
+    <option value="9">9×9 (强化引擎较弱)</option>
+  </select>
+  <label><input type="checkbox" id="forbidden" checked> 禁手(仅黑棋)</label>
+  <button id="restart">重新开始</button>
+  <button id="undo">悔棋</button>
+  <button id="pause" style="display:none">暂停</button>
+</div>
+<div id="status">黑棋先行</div>
+<div id="aiinfo"></div>
+<canvas id="board"></canvas>
+
+<script>
+const ORIGIN = location.protocol.startsWith("http") ? location.origin : "http://localhost:8000";
+const API = ORIGIN + "/move";
+// 每 10 秒向服务器报平安; 网页关闭后服务器约 90 秒自动退出
+setInterval(() => fetch(ORIGIN + "/heartbeat").catch(() => {}), 10000);
+// 切回标签页/窗口获得焦点时立刻补一次心跳，避免后台被节流后服务器超时退出
+["visibilitychange", "focus"].forEach(ev => document.addEventListener(ev, () => {
+  if (document.visibilityState !== "hidden") fetch(ORIGIN + "/heartbeat").catch(() => {});
+}));
+const canvas = document.getElementById("board");
+const ctx = canvas.getContext("2d");
+const statusEl = document.getElementById("status");
+const aiInfoEl = document.getElementById("aiinfo");
+const engineEl = document.getElementById("engine");
+const modeEl = document.getElementById("mode");
+const firstEl = document.getElementById("first");
+const pauseBtn = document.getElementById("pause");
+const ENGINE_NAME = { ab: "传统搜索", nn: "强化学习" };
+const CELL = 44, MARGIN = 30;
+
+let N, board, current, history, gameOver, aiThinking, aiPaused, nnAvailable = true;
+let boardGen = 0;              // 每次「重新开始」+1；AI 响应回来时若代数变了就丢弃
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+// 问一下服务器有哪些引擎可用（没有 /info 的老服务器直接忽略）
+async function checkEngines() {
+  try {
+    const d = await (await fetch(ORIGIN + "/info")).json();
+    nnAvailable = !(d.engines && d.engines.nn === false);
+    if (!nnAvailable) {
+      const opt = engineEl.querySelector('option[value="nn"]');
+      opt.disabled = true;
+      opt.textContent = "AI: 强化学习 (未装权重)";
+      if (engineEl.value === "nn") engineEl.value = "ab";
+    }
+    updateControls();
+  } catch (e) { /* 服务器没响应就先假定可用，等真正落子时再报错 */ }
+}
+
+// AI 对战模式下，黑方用 first 选的引擎，白方用另一个
+function aiEngineFor(player) {
+  if (modeEl.value === "aivai") {
+    const first = firstEl.value;
+    return player === 1 ? first : (first === "ab" ? "nn" : "ab");
+  }
+  return engineEl.value;
+}
+
+function updateControls() {
+  const aivai = modeEl.value === "aivai";
+  firstEl.style.display = aivai ? "" : "none";
+  pauseBtn.style.display = aivai ? "" : "none";
+  if (!nnAvailable) {
+    const opt = modeEl.querySelector('option[value="aivai"]');
+    opt.disabled = true;
+    opt.textContent = "AI 对战 (需要权重)";
+    if (aivai) modeEl.value = "pvp";
+  }
+  statusEl.className = "";
+  aiInfoEl.textContent = "";
+}
+
+function init() {
+  boardGen++;
+  N = parseInt(document.getElementById("size").value);
+  canvas.width = canvas.height = MARGIN * 2 + CELL * (N - 1);
+  board = Array.from({length: N}, () => Array(N).fill(0));
+  current = 1; history = []; gameOver = false; aiThinking = false;
+  aiPaused = false; pauseBtn.textContent = "暂停";
+  aiInfoEl.textContent = "";
+  updateControls();
+  draw();
+  updateStatus();
+  maybeAiMove();
+}
+
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.strokeStyle = "#5a3a1a"; ctx.lineWidth = 1;
+  for (let i = 0; i < N; i++) {
+    line(MARGIN + i*CELL, MARGIN, MARGIN + i*CELL, MARGIN + (N-1)*CELL);
+    line(MARGIN, MARGIN + i*CELL, MARGIN + (N-1)*CELL, MARGIN + i*CELL);
+  }
+  // 星位
+  const stars = N === 15 ? [3,7,11] : [Math.floor(N/2)];
+  ctx.fillStyle = "#5a3a1a";
+  for (const r of stars) for (const c of stars) dot(r, c, 4, "#5a3a1a");
+  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+    if (board[r][c] !== 0) stone(r, c, board[r][c]);
+  }
+  // 轮到黑棋时标出禁手点
+  if (forbiddenOn() && current === 1 && !gameOver) {
+    ctx.fillStyle = "rgba(220, 50, 40, 0.55)";
+    for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+      if (board[r][c] === 0 && isForbidden(r, c)) dot(r, c, 5, ctx.fillStyle);
+    }
+  }
+  // 最后一手标记
+  if (history.length) {
+    const {r, c} = history[history.length - 1];
+    ctx.strokeStyle = "#e33"; ctx.lineWidth = 2;
+    ctx.strokeRect(MARGIN + c*CELL - 8, MARGIN + r*CELL - 8, 16, 16);
+  }
+}
+function line(x1,y1,x2,y2){ ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke(); }
+function dot(r,c,rad,color){ ctx.beginPath(); ctx.arc(MARGIN+c*CELL, MARGIN+r*CELL, rad, 0, 7);
+  ctx.fillStyle=color; ctx.fill(); }
+function stone(r, c, p) {
+  const x = MARGIN + c*CELL, y = MARGIN + r*CELL, rad = CELL*0.42;
+  const g = ctx.createRadialGradient(x-5, y-5, 2, x, y, rad);
+  if (p === 1) { g.addColorStop(0, "#777"); g.addColorStop(1, "#000"); }
+  else { g.addColorStop(0, "#fff"); g.addColorStop(1, "#bbb"); }
+  ctx.beginPath(); ctx.arc(x, y, rad, 0, 7); ctx.fillStyle = g; ctx.fill();
+}
+
+function checkWin(r, c) {
+  const p = board[r][c];
+  for (const [dr, dc] of [[0,1],[1,0],[1,1],[1,-1]]) {
+    let n = 1;
+    for (const s of [1, -1]) {
+      let nr = r + s*dr, nc = c + s*dc;
+      while (nr>=0 && nr<N && nc>=0 && nc<N && board[nr][nc]===p) { n++; nr+=s*dr; nc+=s*dc; }
+    }
+    if (n >= 5) return true;
+  }
+  return false;
+}
+
+// 黑棋禁手: 长连 / 双四 / 双活三 (五连优先, 简化实现不含跳三跳四)
+function isForbidden(r, c) {
+  if (board[r][c] !== 0) return false;
+  board[r][c] = 1;
+  let five = false, over = false, fours = 0, threes = 0;
+  for (const [dr, dc] of [[0,1],[1,0],[1,1],[1,-1]]) {
+    let run = 1, open = 0;
+    for (const s of [1, -1]) {
+      let nr = r + s*dr, nc = c + s*dc;
+      while (nr>=0 && nr<N && nc>=0 && nc<N && board[nr][nc]===1) { run++; nr+=s*dr; nc+=s*dc; }
+      if (nr>=0 && nr<N && nc>=0 && nc<N && board[nr][nc]===0) open++;
+    }
+    if (run === 5) five = true;
+    else if (run > 5) over = true;
+    else if (run === 4 && open >= 1) fours++;
+    else if (run === 3 && open === 2) threes++;
+  }
+  board[r][c] = 0;
+  if (five) return false;
+  return over || fours >= 2 || threes >= 2;
+}
+
+function forbiddenOn() {
+  return document.getElementById("forbidden").checked;
+}
+
+function place(r, c) {
+  if (gameOver) return;
+  if (!(r >= 0 && r < N && c >= 0 && c < N)) return;   // 越界
+  if (board[r][c] !== 0) return;                       // 已占点：忽略，绝不覆盖
+  board[r][c] = current;
+  history.push({r, c});
+  if (checkWin(r, c)) {
+    gameOver = true;
+    statusEl.textContent = (current === 1 ? "黑棋" : "白棋") + "获胜!";
+    statusEl.className = "";
+  } else if (history.length === N*N) {
+    gameOver = true; statusEl.textContent = "平局!";
+  } else {
+    current = -current;
+    updateStatus();
+  }
+  draw();
+  maybeAiMove();
+}
+
+function updateStatus() {
+  if (gameOver) return;
+  statusEl.className = "";
+  if (modeEl.value === "aivai") {
+    const eng = aiEngineFor(current);
+    statusEl.textContent = (current === 1 ? "黑" : "白") + "(" +
+      (ENGINE_NAME[eng] || eng) + ") 落子";
+    return;
+  }
+  statusEl.textContent = current === 1 ? "轮到黑棋" : "轮到白棋";
+}
+
+function isAiTurn() {
+  const mode = modeEl.value;
+  if (mode === "pvp") return false;
+  if (mode === "aivai") return true;
+  return (mode === "pve-black" && current === -1) || (mode === "pve-white" && current === 1);
+}
+
+async function maybeAiMove() {
+  if (gameOver || aiPaused || !isAiTurn() || aiThinking) return;
+  aiThinking = true;
+  const gen = boardGen;                 // 记下发起请求时的棋盘代数
+  const mode = modeEl.value;
+  const eng = aiEngineFor(current);
+  const moverSide = current === 1 ? "黑" : "白";
+  const who = mode === "aivai" ? moverSide + "·" : "";
+  statusEl.textContent = who + (ENGINE_NAME[eng] || "AI") + " 思考中…";
+  statusEl.className = "thinking";
+  if (mode === "aivai") await sleep(350);          // 观战时放慢一点，看得清
+  if (gameOver || aiPaused) { aiThinking = false; return; }
+  try {
+    const res = await fetch(API, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({board, player: current, engine: eng, forbidden: forbiddenOn()}),
+    });
+    const data = await res.json();
+    aiThinking = false;
+    if (gen !== boardGen) return;        // 期间点过「重新开始」，这次结果作废
+    if (data.error) { statusEl.textContent = "AI 出错: " + data.error; statusEl.className = ""; return; }
+    if (!gameOver) place(data.row, data.col);
+    showAIInfo(eng, data.info, mode === "aivai" ? moverSide : "");
+  } catch (e) {
+    aiThinking = false;
+    statusEl.textContent = "连不上 AI 服务器，请先运行: python play_all.py";
+  }
+}
+
+// 显示上一步 AI 的搜索信息（传统引擎给深度/节点数，神经网络给模拟次数）
+function showAIInfo(eng, info, side) {
+  if (!info) { aiInfoEl.textContent = ""; return; }
+  const bits = ["上一步: " + (side ? side + "·" : "") + (ENGINE_NAME[eng] || eng)];
+  if (info.reason) bits.push(info.reason);
+  if (info.depth) bits.push("深度 " + info.depth);
+  if (info.nodes) bits.push(info.nodes.toLocaleString() + " 节点");
+  if (info.sims) bits.push(info.sims + " 次模拟");
+  if (info.think != null) bits.push(Number(info.think).toFixed(2) + " s");
+  aiInfoEl.textContent = bits.join(" · ");
+}
+
+canvas.addEventListener("click", e => {
+  if (gameOver || aiThinking || isAiTurn()) return;
+  const rect = canvas.getBoundingClientRect();
+  const c = Math.round((e.clientX - rect.left - MARGIN) / CELL);
+  const r = Math.round((e.clientY - rect.top - MARGIN) / CELL);
+  if (r<0 || r>=N || c<0 || c>=N || board[r][c] !== 0) return;
+  if (forbiddenOn() && current === 1 && isForbidden(r, c)) {
+    statusEl.textContent = "禁手点! 黑棋不能下这里 (长连/双四/双三)";
+    return;
+  }
+  place(r, c);
+});
+
+document.getElementById("restart").onclick = init;
+modeEl.onchange = () => { updateControls(); init(); };
+document.getElementById("size").onchange = init;
+document.getElementById("forbidden").onchange = draw;
+firstEl.onchange = init;
+pauseBtn.onclick = () => {
+  aiPaused = !aiPaused;
+  pauseBtn.textContent = aiPaused ? "继续" : "暂停";
+  if (aiPaused) {
+    statusEl.textContent = "已暂停（点“继续”接着让 AI 下）";
+  } else {
+    updateStatus();
+    maybeAiMove();
+  }
+};
+document.getElementById("undo").onclick = () => {
+  if (!history.length || aiThinking) return;
+  // 人机模式下撤掉 AI 和玩家各一步
+  const steps = isAiTurn() || gameOver ? 2 : 1;
+  for (let i = 0; i < steps && history.length; i++) {
+    const {r, c} = history.pop();
+    board[r][c] = 0; current = -current;
+  }
+  gameOver = false;
+  aiInfoEl.textContent = "";
+  draw(); updateStatus();
+  maybeAiMove();
+};
+
+checkEngines();
+init();
+</script>
+</body>
+</html>
